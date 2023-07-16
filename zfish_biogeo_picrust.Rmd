@@ -1,0 +1,123 @@
+---
+title: "biogeo_picrust"
+output: html_notebook
+---
+
+
+
+```{r, message=FALSE}
+library(ggplot2)
+library(vegan)
+library(reshape2)
+library(UpSetR)
+options(stringsAsFactors = F)
+```
+
+### Import metadata
+
+```{r}
+zbiogeo_picrust <- read.table("../../../bile_acid_r01/biogeo/flat_files/picrust2/picrust2_zfish_redo/KO_metagenome_out/pred_metagenome_unstrat.tsv.gz", 
+                              header = T,
+                              sep = "\t", 
+                              row.names = 1)
+
+zbiogeo_picrust <- t(zbiogeo_picrust)
+
+zbiogeo.meta <- read.table("../../data/metadata_biogeo.txt",
+                           header = T,
+                              sep = "\t", 
+                              row.names = 1)
+
+all(rownames(zbiogeo.meta) == rownames(zbiogeo_picrust))
+```
+
+### Bile acids
+
+List taken from kegg pathway ko00121
+
+```{r}
+
+bile_acid_genes <- c(
+'K01442', 
+'K00076', 
+'K23231',
+'K22604',
+'K22605',
+'K22606',
+'K22607',
+'K15868',
+'K15871',
+'K15869',
+'K15870',
+'K15872',
+'K15873',
+'K15874',
+'K07007')
+
+bile_acid.df <- as.data.frame(zbiogeo_picrust[,which(colnames(zbiogeo_picrust) %in% bile_acid_genes)])
+
+bile_acid.df$ba.sum <- rowSums(bile_acid.df)
+
+boxplot(bile_acid.df$K00076 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K01442 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K07007 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K15868 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K15870 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K15872 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$K15873 ~ sex, data = zbiogeo.meta)
+boxplot(bile_acid.df$ba.sum ~ sex, data = zbiogeo.meta)
+
+wilcox.test(bile_acid.df$K00076 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$K01442 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$K07007 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$K15868 ~ sex, data = zbiogeo.meta)#sig
+wilcox.test(bile_acid.df$K15870 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$K15872 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$K15873 ~ sex, data = zbiogeo.meta)
+wilcox.test(bile_acid.df$ba.sum ~ sex, data = zbiogeo.meta)
+
+summary(lm(bile_acid.df$K00076 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K01442 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K07007 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K15868 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K15870 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K15872 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$K15873 ~ sex + tissue, data = zbiogeo.meta))
+summary(lm(bile_acid.df$ba.sum ~ sex + tissue, data = zbiogeo.meta))
+
+
+bile_acid.df$sex <- ifelse(zbiogeo.meta$sex,yes = "female", no = "male") 
+bile_acid.df$tissue <- zbiogeo.meta$tissue
+
+K15868.plot <- ggplot(data = bile_acid.df, 
+                    aes(x = factor(sex), y = K15868)) 
+
+pdf("../../analysis/figs/K15868.pdf", width = 3, height = 7)
+K15868.plot + 
+  geom_boxplot(fill = "steelblue") + 
+  theme(
+    text = element_text(size = 20, colour = "black"),
+    panel.grid.major = element_line(colour = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 2,
+  )+
+  ylab("K15868 (BaiB)")+
+  xlab("")
+dev.off()
+
+
+```
+
+#### Overlap between mouse and fish
+
+```{r}
+
+mouse.ba <- c("K00076", "K01442", "K07007", "K15868", "K15873")
+fish.ba <- c("K00076", "K01442", "K07007", "K15868", "K15870", "K15872", "K15873")
+intersect(mouse.ba, fish.ba)
+
+
+```

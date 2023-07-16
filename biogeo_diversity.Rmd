@@ -1,0 +1,603 @@
+---
+title: "Zebrafish biogeography by sex: Diversity analysis"
+output: html_notebook
+---
+
+### Set Environment
+
+```{r}
+
+library(dada2)
+library(ggplot2)
+library(vegan)
+library(reshape2)
+library(glmmTMB)
+library(MASS)
+options(stringsAsFactors = F)
+
+```
+
+### Import data
+
+```{r}
+
+seqtab.nochim <- read.table("../../data/dada2_out/seqtab_nochim.txt",
+                            header = T,
+                            row.names = 1,
+                            sep = "\t"
+                          )
+
+taxa <- read.table("../../data/dada2_out/taxa.txt",
+                            header = T,
+                            row.names = 1,
+                            sep = "\t"
+                          )
+
+#make metadata
+females <- c("F1", "F4", "F5", "F8", "F12") 
+
+metadata <- data.frame(row.names = rownames(seqtab.nochim),
+                       full_name = rownames(seqtab.nochim), 
+                       id = sapply(strsplit(rownames(seqtab.nochim), "_"), 
+                                   FUN = function(x){x[1]}), 
+                       tissue = sapply(strsplit(rownames(seqtab.nochim), "_"), 
+                                       FUN = function(x){x[2]})
+                       )
+
+#add sex : males = 0 Female = 1 
+metadata$sex <-  as.numeric(metadata$id %in% females)
+
+#factor tissue with the right levels 
+metadata$tissue <- factor(metadata$tissue,
+       levels = c("PG", "MG", "HG", "F")
+       )
+
+metadata$sex <- factor(metadata$sex)
+
+write.table(metadata,
+            file = "../../data/metadata_biogeo.txt",
+            sep = "\t",
+            col.names = T,
+            row.names = T,
+            quote = F
+            )
+
+```
+
+
+
+### Normalize
+
+```{r}
+
+raresamp <- min(rowSums(seqtab.nochim))
+
+#now we can plot the curves
+rarecurve(seqtab.nochim, step = 1000,
+          sample = 0,
+          label = F,
+          col = "black")
+
+abline(v = 1000, col = "red")
+abline(v = 2500, col = "yellow")
+abline(v = 5000, col = "black")
+abline(v = 10000, col = "black")
+
+
+set.seed(731)
+seqtab.nochim.rare <- rrarefy(seqtab.nochim, 10000) #rarefy
+seqtab.nochim.rare <- seqtab.nochim.rare[,which(colSums(seqtab.nochim.rare) > 0)]
+
+seqtab.nochim.rclr <- decostand(seqtab.nochim, method = "rclr") #center log blah blah blah
+seqtab.nochim.rel <- decostand(seqtab.nochim, method = "total") #relative abundance
+
+write.table(t(seqtab.nochim.rare),
+            file = "../../data/rarefied_fish_biogeo.txt",
+            sep = "\t",
+            col.names = T,
+            row.names = T,
+            quote = F
+            )
+
+```
+
+
+### Phylotyping
+
+First we need a function that can aggregate asv counts data
+
+
+```{r tax_functions}
+
+###
+#        Function phylotype_analysis             #
+###
+
+phylotype_analysis <- function(obj, tax) {
+  #obj: microbiome object with at least 1 slot (data)
+  #tax: a tax object (named list taxa as names values in the list are seq ids)
+  obj.out <- NULL
+  for (h in 1:length(tax)) {
+    df <- NULL
+    #print(h)#debugging
+    for (i in 1:length(tax[[h]])) {
+      #print(i)#debugging
+      v1       <- obj$data[, unlist(tax[[h]][[i]])]
+      v2       <- names(tax[[h]])[i]
+      if (is.null(dim(v1))) {
+        df[[v2]] <- v1
+      } else{
+        df[[v2]] <- rowSums(v1)
+      }
+    }
+    obj.out[[names(tax)[h]]] <- as.data.frame(df)
+  }
+  return(obj.out)
+}
+
+make_taxa_df <- function(tax){
+
+  kingdom.df <- replicate(length(unique(tax[, 2])), c())
+  names(kingdom.df) <- unique(tax[, 2])
+  phylum.df  <- replicate(length(unique(tax[, 3])), c())
+  names(phylum.df) <- unique(tax[, 3])
+  class.df   <- replicate(length(unique(tax[, 4])), c())
+  names(class.df) <- unique(tax[, 4])
+  order.df   <- replicate(length(unique(tax[, 5])), c())
+  names(order.df) <- unique(tax[, 5])
+  family.df  <- replicate(length(unique(tax[, 6])), c())
+  names(family.df) <- unique(tax[, 6])
+  genus.df   <- replicate(length(unique(tax[, 7])), c())
+  names(genus.df) <- unique(tax[, 7])
+
+  for (i in 1:nrow(tax)) {
+    kingdom.df[[tax[i, 2]]] <-
+      c(kingdom.df[[tax[i, 2]]], tax[i, 1])
+    phylum.df[[tax[i, 3]]]  <-
+      c(phylum.df[[tax[i, 3]]], tax[i, 1])
+    class.df[[tax[i, 4]]]   <-
+      c(class.df[[tax[i, 4]]], tax[i, 1])
+    order.df[[tax[i, 5]]]   <-
+      c(order.df[[tax[i, 5]]], tax[i, 1])
+    family.df[[tax[i, 6]]]  <-
+      c(family.df[[tax[i, 6]]], tax[i, 1])
+    genus.df[[tax[i, 7]]]   <-
+      c(genus.df[[tax[i, 7]]], tax[i, 1])
+  }
+
+  tax.obj <- NULL
+  tax.obj$kingdom <- kingdom.df
+  tax.obj$phylum  <- phylum.df
+  tax.obj$class   <- class.df
+  tax.obj$order   <- order.df
+  tax.obj$family  <- family.df
+  tax.obj$genus   <- genus.df
+
+  return(tax.obj)
+}
+
+```
+
+Now to make taxon level tables we simply apply the functions. Note, if we are using a filtered table (i.e., rarefied table) some ASVs may be inconsistent between the original (nochim) and the filtered table which will cause problems for the above functions. We can still use these tables, but we must filter as below first
+
+```{r taxon_table_generation}
+
+#we need to add an ASV identifier for the tax function to work properly
+#we also need to restrict this analysis to only ASV IDs present in the data
+#we will generate a obj in the process (below)
+
+tax.bio <- taxa[which(rownames(taxa) %in% colnames(seqtab.nochim.rare)),]
+tax.bio <- data.frame(asv = rownames(tax.bio), tax.bio)
+
+#make a data frame of taxonomy
+biogeo.tax <- make_taxa_df(tax = tax.bio)
+
+# aggregate phylotype counts for this we will need to provide an object with a
+# slot called data
+biogeo.obj <- NULL
+biogeo.obj$data <- seqtab.nochim.rare
+
+#classifying taxonomy
+biogeo_taxonomy <- phylotype_analysis(biogeo.obj, tax = biogeo.tax)
+
+```
+
+
+### Alpha diversity 
+
+#### Calculate Richness and Entropy
+
+```{r}
+
+#richness 
+richness.rare <- data.frame(specnumber(seqtab.nochim.rare))
+colnames(richness.rare) <- "richness"
+head(richness.rare)
+
+#shannon entropy
+shannon.rare <- data.frame(diversity(seqtab.nochim.rare, index = "shannon"))
+colnames(shannon.rare) <- "shannon"
+head(shannon.rare)
+
+richness.fit <- glmmTMB(richness.rare$richness ~ tissue + sex + (1|id), data = metadata)
+
+shannon.fit <- glmmTMB(shannon.rare$shannon ~ tissue + sex + (1|id), data = metadata)
+
+summary(richness.fit)
+summary(shannon.fit)
+
+Anova(richness.fit)
+Anova(shannon.fit)
+
+```
+
+
+#### Plot Richness and Entropy
+
+```{r}
+
+richness.rare$tissue <- metadata$tissue
+richness.rare$sex <- metadata$sex
+
+shannon.rare$tissue <- metadata$tissue
+shannon.rare$sex <- factor(metadata$sex)
+
+
+
+rich.plot <- ggplot(data = richness.rare, aes(x = tissue,
+                                              y = richness,
+                                              fill = factor(sex)))  
+
+png(filename = "../../analysis/figs/sex_biogeo_richness.png", res = 300, width = 7,height = 7, units = "in")
+
+rich.plot + 
+  geom_boxplot()+
+  scale_fill_manual("Sex", values = c("#ffe8d6", "#495877"), labels = c("Male", "Female"))+
+  scale_x_discrete("", labels =c ("PG"="Proximal", "MG"="Middle", "HG"="Distal","F"="Feces"))+
+ 
+  theme(
+    text = element_text(size = 16, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1,
+  ) + 
+  ylab("Richness")
+
+dev.off()
+
+
+shannon.rare$tissue <- metadata$tissue
+shannon.rare$sex <- metadata$sex
+
+shannon.plot <- ggplot(data = shannon.rare, aes(x = tissue,
+                                                y = shannon,
+                                                fill = factor(sex))) 
+
+png(filename = "../../analysis/figs/sex_biogeo_shannon.png", res = 300, width = 7,height = 7, units = "in")
+
+shannon.plot + 
+  geom_boxplot()+
+  scale_fill_manual("Sex", values = c("#ffe8d6", "#495877"), labels = c("Male", "Female"))+
+  scale_x_discrete("", labels =c ("PG"="Proximal", "MG"="Middle", "HG"="Distal","F"="Feces"))+
+ 
+  theme(
+    text = element_text(size = 16, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1,
+  ) + 
+  ylab("Shannon")
+
+dev.off()
+
+
+```
+
+
+### Beta Diversity
+
+
+```{r rel_abund}
+
+seq.rare.prcomp <- prcomp(seqtab.nochim.rel, scale =F, center = F) # defaults
+summary(seq.rare.prcomp)
+plot(seq.rare.prcomp)
+
+seqtab_rare_pca.df <- as.data.frame(seq.rare.prcomp$x[,1:5])
+
+#add metadata for plotting
+seqtab_rare_pca.df$tissue <- metadata$tissue
+seqtab_rare_pca.df$sex <- metadata$sex
+seqtab_rare_pca.df$id <- metadata$id
+
+
+seqtab_rare_pca.plot <- ggplot(data = seqtab_rare_pca.df,
+                                 aes(x = PC1,
+                                     y = PC2,
+                                     color = tissue, 
+                                     shape = factor(sex)
+                                     ) 
+                               ) 
+seqtab_rare_pca.plot +
+  geom_point(size = 3, alpha = .7)+
+  scale_color_brewer(palette = "Dark2")+
+  theme(
+    text = element_text(size = 16, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1,
+  )+
+  xlab("PC1 (63%)")+
+  ylab("PC2 (34%)")
+
+```
+
+We can try something similar with the log ratio transformed too, but it wont work with PCA like I originally thought.
+
+```{r robust_aitchison}
+#PCoA 
+seq.rclr.cmdscale <- cmdscale(vegdist(x = seqtab.nochim, method = "robust.aitchison"), k =5, eig = T)
+
+#percent variation explained 
+round(seq.rclr.cmdscale$eig*100/sum(seq.rclr.cmdscale$eig),1)
+
+#grab the dims
+seq.rclr.cmdscale.df <- as.data.frame(seq.rclr.cmdscale$points)
+
+#add metadata for plotting
+seq.rclr.cmdscale.df$tissue <- metadata$tissue
+seq.rclr.cmdscale.df$sex <- metadata$sex
+seq.rclr.cmdscale.df$id <- metadata$id
+
+colnames(seq.rclr.cmdscale.df) <- c("Dim1","Dim2", "Dim3", "Dim4", "Dim5", "tissue", "sex", "id")
+
+
+seq.rclr.cmdscale.plot <- ggplot(data = seq.rclr.cmdscale.df,
+                                 aes(x = Dim1,
+                                     y = Dim2,
+                                     color = tissue, 
+                                     shape = factor(sex)
+                                     ) 
+                               ) 
+seq.rclr.cmdscale.plot +
+  geom_point(size = 3, alpha = .7)+
+  scale_color_brewer(palette = "Dark2")+
+  theme(
+    text = element_text(size = 16, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1,
+  )+
+  xlab("PC1 (17%)")+
+  ylab("PC2 (11%)")
+
+```
+
+Finally, lets see if the groups label correlates with microbiome diversity.  
+
+```{r adonis}
+set.seed(731) 
+
+seq_rel.adonis2 <- adonis2(seqtab.nochim.rel ~  tissue * factor(sex),
+                                permutations = 5000, 
+                                by = "terms",
+                                data = metadata,
+                                na.action = na.omit)
+
+
+seq_rclr.adonis2 <- adonis2(seqtab.nochim ~  tissue * factor(sex) ,
+                                method ="robust.aitchison",
+                                permutations = 5000, 
+                                by = "terms",
+                                data = metadata,
+                                na.action = na.omit)
+
+
+seq_rel.adonis2
+seq_rclr.adonis2
+```
+
+
+```{r beta_dispersion}
+disp.rclr <- betadisper(vegdist(seqtab.nochim, method = "robust.aitchison"), group = metadata$tissue)
+
+disp.rel <- betadisper(vegdist(seqtab.nochim, method = "bray"), group = metadata$tissue)
+
+
+anova(disp.rclr)
+anova(disp.rel)
+
+disp.rclr <- betadisper(vegdist(seqtab.nochim, method = "robust.aitchison"), group = metadata$sex)
+
+disp.rel <- betadisper(vegdist(seqtab.nochim, method = "bray"), group = metadata$sex)
+
+
+anova(disp.rclr)
+anova(disp.rel)
+
+```
+
+```{r cca_plot}
+
+seqtab.nochim.rel.cca <- cca(seqtab.nochim.rel ~ sex * tissue, data = metadata)
+
+set.seed(731)
+asv_cca.anova <-anova(seqtab.nochim.rel.cca, by ="terms")
+
+cca.df <- data.frame(scores(seqtab.nochim.rel.cca, tidy = F, display = "wa", choices = c(1:7)))
+
+cca.df$tissue <- metadata$tissue
+cca.df$sex <- metadata$sex
+
+cca.ggplot <- ggplot(data = cca.df, 
+                     aes(x = CCA1,
+                         y = CCA2, 
+                         color = tissue, 
+                         shape = factor(sex))
+                    )
+
+png(filename = "../../analysis/figs/sex_biogeo_cca.png", res = 300, width = 7,height = 7, units = "in")
+cca.ggplot +
+  geom_point(size = 8, alpha = .7)+
+  scale_color_brewer("Tissue", palette = "Dark2", labels = c("Proximal", "Middle", "Distal", "Feces"))+
+  scale_shape_manual("Sex", values = c(16, 17), labels = c("Male", "Female"))+
+  theme(
+    text = element_text(size = 20, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1, legend.position = "bottom", legend.box="vertical"
+  )
+
+dev.off()
+
+cca_rev.ggplot <-  ggplot(data = cca.df, 
+                     aes(x = CCA1,
+                         y = CCA2, 
+                         shape = tissue, 
+                         fill = factor(sex)
+                         )
+)
+
+png(filename = "../../analysis/figs/sex_biogeo_cca_rev.png", res = 300, width = 7,height = 7, units = "in")
+
+cca_rev.ggplot +
+  geom_point(size = 8, alpha = .7)+
+  scale_fill_brewer("Sex", palette = "Dark2", labels =  c("Female", "Male"))+
+  scale_shape_manual("Tissue", values = c(21, 22, 23,25), labels = c("Proximal", "Middle", "Distal", "Feces"))+
+  theme(
+    text = element_text(size = 20, colour = "black"),
+    panel.grid.major = element_line(colour = "grey99"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    aspect.ratio = 1,
+    legend.position = "bottom", 
+    legend.box="vertical"
+  )+
+  guides(fill = guide_legend(
+    override.aes=list(shape = 21)), 
+    shape =  guide_legend(
+    override.aes=list(fill = "grey20")))
+
+dev.off()
+```
+
+#### Statistical analysis of sex
+
+I prefer to use counts data (rarefied) for regression with MB data. We will use a model comparison procedure to control false discovery rate. We will begin with feces.  
+```{r stats_fecal}
+
+# make a df with just fecal samples
+
+#sample names to keep
+fecal.names <- rownames(metadata[which(metadata$tissue == "F"),])
+
+#make meta
+fecal.metadata <- metadata[which(rownames(metadata) %in% fecal.names),]
+
+#make asv table
+fecal.rare <- seqtab.nochim.rare[which(rownames(seqtab.nochim.rare) %in% fecal.names),]
+dim(fecal.rare)
+
+fecal.rare <- fecal.rare[,which(colSums(fecal.rare) > 0)]
+dim(fecal.rare)
+
+fecal.stats.obj <- NULL 
+
+for(i in 1:ncol(fecal.rare)){
+  fit0 <- NULL
+  fit1 <- NULL 
+  fit.anova <- NULL
+  
+  try(fit0 <- glm.nb(fecal.rare[,i] ~ 1))
+  try(fit1 <- glm.nb(fecal.rare[,i] ~ sex , data = fecal.metadata))
+  try(fit.anova <- anova(fit0, fit1))
+  
+  fecal.stats.obj[[colnames(fecal.rare)[i]]]$null <- fit0
+  fecal.stats.obj[[colnames(fecal.rare)[i]]]$alt <- fit1
+  fecal.stats.obj[[colnames(fecal.rare)[i]]]$fit.aov <- fit.anova
+}
+
+#make a summary data frame
+fecal.stats.df <- data.frame(asv = names(fecal.stats.obj),
+                             p.val = sapply(fecal.stats.obj, FUN = function(x){x$fit.aov$`Pr(Chi)`[2]}),
+                             fdr = p.adjust(sapply(fecal.stats.obj, FUN = function(x){x$fit.aov$`Pr(Chi)`[2]}), method = "fdr")
+
+                             
+                             )
+
+fecal.sig <- fecal.stats.df[which(fecal.stats.df$fdr < .2),"asv"]
+
+for(i in fecal.sig){
+  boxplot(fecal.rare[,i] ~ sex , data = fecal.metadata, main = i)
+}
+
+```
+
+
+```{r stats_pg}
+
+# make a df with just fecal samples
+
+#sample names to keep
+pg.names <- rownames(metadata[which(metadata$tissue == "PG"),])
+
+#make meta
+pg.metadata <- metadata[which(rownames(metadata) %in% pg.names),]
+
+#make asv table
+pg.rare <- seqtab.nochim.rare[which(rownames(seqtab.nochim.rare) %in% pg.names),]
+dim(pg.rare)
+
+pg.rare <- pg.rare[,which(colSums(pg.rare) > 0)]
+dim(pg.rare)
+
+pg.stats.obj <- NULL 
+
+for(i in 1:ncol(pg.rare)){
+  fit0 <- NULL
+  fit1 <- NULL 
+  fit.anova <- NULL
+  
+  try(fit0 <- glm.nb(pg.rare[,i] ~ 1))
+  try(fit1 <- glm.nb(pg.rare[,i] ~ sex , data = pg.metadata))
+  try(fit.anova <- anova(fit0, fit1))
+  
+  pg.stats.obj[[colnames(pg.rare)[i]]]$null <- fit0
+  pg.stats.obj[[colnames(pg.rare)[i]]]$alt <- fit1
+  pg.stats.obj[[colnames(pg.rare)[i]]]$fit.aov <- fit.anova
+}
+
+#make a summary data frame
+pg.stats.df <- data.frame(asv = names(pg.stats.obj),
+                             p.val = sapply(pg.stats.obj, FUN = function(x){x$fit.aov$`Pr(Chi)`[2]}),
+                             fdr = p.adjust(sapply(pg.stats.obj, FUN = function(x){x$fit.aov$`Pr(Chi)`[2]}), method = "fdr")
+
+                             
+                             )
+
+pg.sig <- pg.stats.df[which(pg.stats.df$fdr < .2),"asv"]
+
+for(i in pg.sig){
+  boxplot(pg.rare[,i] ~ sex , data = pg.metadata, main = i)
+}
+
+
+
+```

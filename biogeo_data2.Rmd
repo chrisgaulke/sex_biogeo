@@ -1,0 +1,232 @@
+---
+title: "Zebrafish biogeography by sex: DADA2"
+output: html_notebook
+---
+
+### Set the environment
+
+#### Load required libraries
+
+```{r}
+
+library(dada2)
+library(ggplot2)
+options(stringsAsFactors = F)
+
+```
+
+***
+
+### Import data
+
+```{r}
+path <- "/Users/cgaulke/unsynced_projects/raw_data/2023_04_21_fish_biogeo/"
+
+filt.path <- "/Users/cgaulke/Documents/research/zebrafish_biogeography_plus_sex/data/filtered" #filtered file directory 
+
+head(list.files(path))
+
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq.gz", full.names = TRUE))
+```
+
+***
+
+### Quality Control
+
+First we will make sure nothing has gone wrong by checking that the number of forward and reverse read files are the same. 
+
+```{r}
+length(fnFs) == length(fnRs)
+
+sample.names <- sapply(strsplit(basename(fnFs), "_R1"), `[`, 1) # better sample names
+```
+
+#### Plotting quality scores using dada2
+
+```{r}
+
+fnFs_qual.plot <- plotQualityProfile(fnFs,aggregate = T)
+fnRs_qual.plot <- plotQualityProfile(fnRs,aggregate = T)
+
+
+fnFs_qual.plot + geom_hline(yintercept= 25) + geom_vline(xintercept = 250)
+
+fnRs_qual.plot + geom_hline(yintercept= 25) + geom_vline(xintercept = 200)
+
+```
+
+#### Filtering reads
+
+Next we want to set up names and locations for our filtered files that we will create later
+
+```{r}
+filtFs <- file.path(filt.path, "filtered",
+                    paste0(sample.names, "_F_filt.fastq.gz"))
+
+filtRs <- file.path(filt.path, "filtered",
+                    paste0(sample.names, "_R_filt.fastq.gz"))
+
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+Looking at the data we see a rapid drop in quality around 250bp R1 (200 R2). Since the average drops below ~30 (99.9% accuracy) around 250 and approachs Q25 at 200 we will truncate at 200 for the reverse. The forward looks better (this is usual) so we will truncate around 250. We will also take off about 10 bases on the left as these bases are highly skewed (see multiqc).
+
+```{r}
+filter.out <- filterAndTrim(fnFs, #paths to the input forward reads
+                            filtFs, #paths to the output filtered forward reads
+                            fnRs, #paths to the input reverse reads
+                            filtRs, #paths to the output filtered reverse reads
+                            truncLen=c(250,200), #R1 and R2 truncation lengths
+                            maxN=0, #max allowable N's (ambiguous bases) in seq
+                            maxEE=c(2,2), # max error allowed after filtering
+                            truncQ=2, # truncate at first base with this score
+                            rm.phix=TRUE, # remove phix reads
+                            trimLeft = 10, # number of nt to trim from left
+                            compress=TRUE, # gzip files
+                            multithread=TRUE # OK for Mac, turn off on Windows
+                            )
+```
+
+Now Let's check out the results 
+
+```{r}
+head(filter.out)
+
+colMeans(filter.out) #mean number of reads in and out of filtering
+mean(1-(filter.out[,2]/filter.out[,1])) #mean % filtered reads
+
+fivenum(1-(filter.out[,2]/filter.out[,1])) #five number report for % filtered
+hist(1-(filter.out[,2]/filter.out[,1]))  # hist #mean % filtered reads
+
+```
+
+***
+
+### Sequence error analysis  
+
+The core Dada2 algorithm requires that we understand the error rates of the specific sequence reads our data set. 
+```{r,message=FALSE}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+plotErrors(errF, nominalQ=TRUE)
+```
+
+Now we can use these data to denoise our reads. 
+
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+***
+
+### Merge and Filter reads 
+
+
+```{r,message=FALSE}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+#Make a table of samples x asvs 
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+#remove chimeras
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus",
+                                    multithread=TRUE,
+                                    verbose=TRUE)
+
+dim(seqtab.nochim)
+```
+
+In some libraries chimeras can make up a large portion of ASVs, so we should always quantify our lose 
+
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+### Track reads
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(filter.out, sapply(dadaFs, getN),
+               sapply(dadaRs, getN),
+               sapply(mergers, getN),
+               rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+***
+
+### Add Taxonomy
+
+Here is where you will need to go and download the silva databases.Be sure to get the right ones (the names are the same as the ones below) These files can be downloaded here: https://zenodo.org/record/4587955#.YSlzKC1h1hA
+
+```{r}
+
+taxa <- assignTaxonomy(seqtab.nochim,
+          "/Users/cgaulke/unsynced_projects/db/silva_dada2/silva_nr99_v138.1_train_set.fa",
+          multithread=TRUE)
+
+#note species assignment is probably not super accurate 
+taxa <- addSpecies(taxa, "/Users/cgaulke/unsynced_projects/db/silva_dada2/silva_species_assignment_v138.1.fa")
+
+dada.names <- paste0("asv", 1:ncol(seqtab.nochim))
+
+asv.dict <- data.frame(row.names = dada.names,
+                       asv_name = dada.names, 
+                       seq = colnames(seqtab.nochim))
+
+
+colnames(seqtab.nochim) <- dada.names
+rownames(taxa) <- dada.names
+```
+
+
+###Export Data
+
+```{r}
+
+# for(i in 1:nrow(asv.dict)){
+#   if(i == nrow(asv.dict)){
+#     cat(paste0(">",asv.dict[i,1], "\n"),  file = "../../data/fish_biogeo.fna", append = T)
+#     cat(paste0(asv.dict[i,2]), file = "../../data/fish_biogeo.fna",append = T)  
+#   }else{
+#     cat(paste0(">",asv.dict[i,1], "\n"),  file = "../../data/fish_biogeo.fna", append = T)
+#     cat(paste0(asv.dict[i,2],"\n"), file = "../../data/fish_biogeo.fna",append = T)
+#   }
+# }
+
+dir.create("../../data/dada2_out/")
+
+#write out fasta file for ASVs
+for(i in 1:nrow(asv.dict)){
+  cat(paste(">", asv.dict[i,1]), file = "../../data/dada2_out/biogeo_asv.fa", sep = "\n", append = T)
+  
+  cat(asv.dict[i,2], file = "../../data/dada2_out/biogeo_asv.fa", sep = "\n", append = T)  
+ 
+}
+
+write.table(seqtab.nochim,
+            file = "../../data/dada2_out/seqtab_nochim.txt",
+            quote = FALSE,
+            sep = "\t",
+            )
+
+
+write.table(taxa,
+            file = "../../data/dada2_out/taxa.txt",
+            quote = FALSE,
+            sep = "\t",
+            )
+
+write.table(asv.dict,
+            file = "../../data/dada2_out/asv_dict.txt",
+            quote = FALSE,
+            sep = "\t",
+            )
+
+```
